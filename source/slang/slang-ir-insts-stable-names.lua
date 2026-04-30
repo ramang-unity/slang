@@ -828,5 +828,5 @@ return {
 	["SpecializeExistentialsInType"] = 852,
 	["assumeAddress"] = 853,
 	["DebugCompilationUnit"] = 854,
-	["SubpassLoad"] = 855
+	["SubpassLoad"] = 855 -- added in module version 16
 }
