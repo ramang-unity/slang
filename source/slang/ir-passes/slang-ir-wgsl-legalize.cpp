@@ -240,8 +240,69 @@ struct GlobalInstInliningContext : public GlobalInstInliningContextGeneric
     }
 };
 
+// Rewrite every `DescriptorHandle<T>` type to `uint2`, which is how WGSL represents a handle, and
+// forward the casts between a handle and its `uint2`.
+//
+// Consider a constant buffer that holds a `Sampler2D.Handle`. On WGSL the handle is only ever read
+// as the two `u32` indices it carries, but its `DescriptorHandle<T>` type still refers to `T` and
+// to `T`'s `IOpaqueDescriptor` witness table. By this point `lowerCombinedTextureSamplers` has
+// replaced `Sampler2D` with a struct that holds a texture and a sampler, and WGSL cannot declare a
+// struct with such members. Once the handle is a `uint2`, nothing that reaches emit refers to `T`,
+// so dead code elimination removes the struct together with the witness table.
+static void lowerDescriptorHandleTypesToUInt2(IRModule* module)
+{
+    // Collect the casts and the handle types in a single walk before mutating, so replacing and
+    // removing insts does not invalidate the traversal.
+    List<IRInst*> castsToForward;
+    List<IRInst*> handleTypes;
+
+    List<IRInst*> workList;
+    workList.add(module->getModuleInst());
+    while (workList.getCount())
+    {
+        auto inst = workList.getLast();
+        workList.removeLast();
+        for (auto child : inst->getChildren())
+            workList.add(child);
+
+        switch (inst->getOp())
+        {
+        case kIROp_CastDescriptorHandleToUInt2:
+        case kIROp_CastUInt2ToDescriptorHandle:
+            castsToForward.add(inst);
+            break;
+        case kIROp_DescriptorHandleType:
+            handleTypes.add(inst);
+            break;
+        default:
+            break;
+        }
+    }
+
+    // After the type rewrite below both the operand and the result of each cast are `uint2`, so
+    // every cast is an identity.
+    for (auto cast : castsToForward)
+    {
+        cast->replaceUsesWith(cast->getOperand(0));
+        cast->removeAndDeallocate();
+    }
+
+    if (handleTypes.getCount())
+    {
+        IRBuilder builder(module);
+        auto uint2Type = builder.getVectorType(builder.getUIntType(), 2);
+        for (auto handleType : handleTypes)
+        {
+            handleType->replaceUsesWith(uint2Type);
+            handleType->removeAndDeallocate();
+        }
+    }
+}
+
 void legalizeIRForWGSL(IRModule* module, TargetProgram* targetProgram, DiagnosticSink* sink)
 {
+    lowerDescriptorHandleTypesToUInt2(module);
+
     List<EntryPointInfo> entryPoints;
     for (auto inst : module->getGlobalInsts())
     {

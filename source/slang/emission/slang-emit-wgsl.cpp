@@ -1505,6 +1505,21 @@ void WGSLSourceEmitter::emitCallArg(IRInst* inst)
     }
 }
 
+CLikeSourceEmitter::FoldPolicy WGSLSourceEmitter::getFoldPolicy(IRInst* inst)
+{
+    switch (inst->getOp())
+    {
+    case kIROp_LoadResourceDescriptorFromHeap:
+    case kIROp_LoadSamplerDescriptorFromHeap:
+        // The C-like default declares these loads as temporaries. WGSL cannot declare a
+        // function-scope variable of a texture or sampler type, so every use emits its own
+        // `getResource` call instead.
+        return FoldPolicy::Always;
+    default:
+        return CLikeSourceEmitter::getFoldPolicy(inst);
+    }
+}
+
 bool WGSLSourceEmitter::shouldFoldInstIntoUseSites(IRInst* inst)
 {
     bool result = CLikeSourceEmitter::shouldFoldInstIntoUseSites(inst);
@@ -1791,6 +1806,22 @@ bool WGSLSourceEmitter::tryEmitInstExprImpl(IRInst* inst, const EmitOpInfo& inOu
             emitOperand(inst->getOperand(1), getInfo(EmitOp::General));
             m_writer->emit(")/4] = ");
             emitOperand(inst->getOperand(inst->getOperandCount() - 1), getInfo(EmitOp::General));
+            return true;
+        }
+        break;
+
+    case kIROp_LoadResourceDescriptorFromHeap:
+    case kIROp_LoadSamplerDescriptorFromHeap:
+        {
+            // WGSL keeps textures and samplers in a single resource table, so both loads read it
+            // with `getResource<T>(index)`. Chromium implements the table from the WebGPU
+            // bindless proposal under the `chromium_experimental_resource_table` extension.
+            _requireExtension(toSlice("chromium_experimental_resource_table"));
+            m_writer->emit("getResource<");
+            emitType(inst->getDataType());
+            m_writer->emit(">(");
+            emitOperand(inst->getOperand(0), getInfo(EmitOp::General));
+            m_writer->emit(")");
             return true;
         }
         break;

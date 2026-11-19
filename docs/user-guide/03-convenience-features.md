@@ -670,7 +670,7 @@ declaring pointers to read-only and immutable values, and pointers to address sp
 ## `DescriptorHandle` for Bindless Descriptor Access
 
 Slang supports the `DescriptorHandle<T>` type that represents a bindless handle to a resource. This feature provides a portable way of implementing
-the bindless resource idiom. When targeting HLSL, GLSL, and SPIR-V, where descriptor types (e.g., textures, samplers, and buffers) are opaque handles,
+the bindless resource idiom. When targeting HLSL, GLSL, SPIR-V, and WGSL, where descriptor types (e.g., textures, samplers, and buffers) are opaque handles,
 `DescriptorHandle<T>` will translate into a `uint2` so it can be defined in any memory location. The underlying `uint2` value is treated as an index
 to access the global descriptor heap or resource array in order to obtain the actual resource handle. On targets where resource handles
 are not opaque handles, `DescriptorHandle<T>` maps to `T` and will have the same size and alignment defined by the target.
@@ -728,14 +728,15 @@ void main(uint3 tid : SV_DispatchThreadID)
 to sampler types; a heap-family mismatch (for example `SamplerState s = ResourceDescriptorHeap[i];`, or
 `Texture2D.Handle th = SamplerDescriptorHeap[j];`) is a compile error. Separately, a combined
 texture-sampler (e.g. `Sampler2D`) needs two distinct heap indices -- one for the texture and one for
-the sampler -- on HLSL and on SPIR-V with the `spvDescriptorHeapEXT` extension, whose lowering keeps
-the two as separate descriptors. A single-index `ResourceDescriptorHeap[i]` handle supplies only one,
+the sampler -- on HLSL, on SPIR-V with the `spvDescriptorHeapEXT` extension, and on WGSL with the
+`wgsl_resource_table` capability, whose lowerings keep the two as separate descriptors. A
+single-index `ResourceDescriptorHeap[i]` handle supplies only one,
 so building a combined sampler from it is a compile-time error on those targets; use the explicit
 `Sampler2D.Handle(uint2(resourceIndex, samplerIndex))` form, which supplies both, instead. The
 single-index form is accepted on the default SPIR-V and GLSL model, where a combined sampler is a
-single native descriptor read by one heap index. (On WGSL, recovering a combined texture-sampler from
-the descriptor heap is not currently supported in either form -- an unrelated limitation of WGSL's
-combined-sampler lowering.) The recovered value rides the
+single native descriptor read by one heap index. (On WGSL without `wgsl_resource_table`, recovering a
+combined texture-sampler from the descriptor heap is not currently supported in either form -- an
+unrelated limitation of WGSL's combined-sampler lowering.) The recovered value rides the
 existing `DescriptorHandle<T>` lowering, so this syntax is available on the same targets as the
 `DescriptorHandle<T>` representation it builds — HLSL, SPIR-V, GLSL, and WGSL — and lowers through the
 bindless path described below. On targets where that representation is unavailable (Metal, CUDA, CPU),
@@ -850,6 +851,66 @@ entries are unaffected.
 > based on the address width rather than the opaque acceleration structure type. This matches how GPU
 > drivers expose acceleration structure descriptors in the heap (as device addresses), and requires either
 > the `SPV_KHR_ray_tracing` or `SPV_KHR_ray_query` extension.
+
+### WGSL with `wgsl_resource_table`
+
+By default, WGSL output reads descriptor handles from `binding_array` descriptor heaps, the WGSL
+counterpart of the default SPIR-V model above. Tint, the WGSL compiler in Chromium-based browsers, does
+not accept an unsized `binding_array`, so this output targets naga (wgpu).
+
+When the `wgsl_resource_table` capability is requested (for example with `-capability wgsl_resource_table`),
+Slang instead reads descriptor handles from the WebGPU resource table described in the
+[WebGPU bindless proposal](https://github.com/gpuweb/gpuweb/blob/main/proposals/bindless.md). The table
+has no binding in the shader, so Slang declares none. Each dereference of a handle becomes a call to
+`getResource<T>(index)` with `uint2.x` as the index, and the shader enables the
+`chromium_experimental_resource_table` extension, which is the name Chromium implements the proposal under.
+For example:
+
+```slang
+struct Material
+{
+    Texture2D.Handle albedo;
+    SamplerState.Handle linearSampler;
+}
+ConstantBuffer<Material> material;
+
+[shader("fragment")]
+float4 fragmentMain(float2 uv : TEXCOORD0) : SV_Target
+{
+    return material.albedo.Sample(material.linearSampler, uv);
+}
+```
+
+translates to:
+
+```wgsl
+enable chromium_experimental_resource_table;
+struct Material_std140_0
+{
+    @align(16) albedo_0 : vec2<u32>,
+    @align(8) linearSampler_0 : vec2<u32>,
+};
+
+@binding(0) @group(0) var<uniform> material_0 : Material_std140_0;
+
+// ...
+    textureSample(getResource<texture_2d<f32>>(material_0.albedo_0.x),
+                  getResource<sampler>(material_0.linearSampler_0.x), _S1.uv_0)
+```
+
+The resource table holds textures and samplers in a single index space, so `ResourceDescriptorHeap[i]`
+and `SamplerDescriptorHeap[i]` both read entry `i` of the table. A combined texture-sampler handle such as
+`Sampler2D.Handle` uses `uint2.x` as the index of the texture and `uint2.y` as the index of the sampler,
+as on HLSL. WGSL places no uniformity requirement on the `getResource` index, so `nonuniform()` has no
+effect on this target.
+
+The WebGPU `"sampling-resource-table"` feature only lets a resource table hold sampled textures and
+samplers, and `getResource` accepts no other types. Dereferencing a handle to a buffer or to a storage
+texture under `wgsl_resource_table` is therefore a compile-time error.
+
+On the host side, `IBindlessResourceMetadata::usesBindlessResourceHeap()` reports whether the shader reads
+the resource table. Such a pipeline needs a layout created with `usesResourceTable: true` (an `"auto"`
+layout sets it automatically) and a `GPUResourceTable` bound on the pass.
 
 ### Custom Descriptor Fetch
 

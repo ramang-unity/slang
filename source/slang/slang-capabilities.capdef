@@ -261,6 +261,13 @@ def optix_coopvec : _cuda_sm_9_0;
 /// Represents capabilities required for optix multi-level traversal support.
 def optix_multilevel_traversal : _cuda_sm_5_0;
 
+// WGSL extensions
+
+/// Represents the WebGPU resource table, from which WGSL reads sampled textures and samplers with
+/// `getResource<T>(index)`. Slang emits it as the `chromium_experimental_resource_table` extension.
+/// [EXT]
+def wgsl_resource_table : wgsl;
+
 /// All code-gen targets
 /// [Compound]
 alias any_target = hlsl | metal | glsl | c | cpp | cuda | spirv | wgsl | llvm;

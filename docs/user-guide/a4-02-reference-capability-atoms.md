@@ -976,6 +976,10 @@ Extensions
 `spvVulkanMemoryModelKHR`
 > Represents the SPIR-V capability for vulkan memory model.
 
+`wgsl_resource_table`
+> Represents the WebGPU resource table, from which WGSL reads sampled textures and samplers with
+> `getResource<T>(index)`. Slang emits it as the `chromium_experimental_resource_table` extension.
+
 Compound Capabilities
 ----------------------
 *Capabilities to specify capabilities created by other capabilities (`raytracing`, `meshshading`...)*

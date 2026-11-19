@@ -29141,17 +29141,19 @@ extension _Texture<T, Shape, isArray, isMS, sampleCount, access, isShadow, isCom
         // texture-sampler from it hard-codes the sampler to heap slot 0. Reject that only on the
         // targets whose `defaultGetDescriptorFromHandle` arm routes a `CombinedTextureSampler`
         // through `__makeCombinedTextureSamplerFromHandle`, i.e. consumes a separate sampler index:
-        // HLSL and SPIR-V `spvDescriptorHeapEXT`. Default SPIR-V and GLSL instead load one native
-        // combined descriptor by `.x`, where the single index is correct, so they are accepted.
-        // WGSL is not covered here: it splits a combined sampler into two descriptors in the later
-        // `lowerCombinedTextureSamplers` pass, which runs before this `static_assert` is checked and
-        // itself fails on a combined sampler built from the heap, so this guard cannot turn that into
-        // a clean diagnostic. These `case`s mirror the combined-sampler branches in
-        // `defaultGetDescriptorFromHandle`; the two lists are kept in agreement.
+        // HLSL, SPIR-V `spvDescriptorHeapEXT` and WGSL `wgsl_resource_table`. Default SPIR-V and GLSL
+        // instead load one native combined descriptor by `.x`, where the single index is correct, so
+        // they are accepted. Default WGSL is not covered here: it splits a combined sampler into two
+        // descriptors in the later `lowerCombinedTextureSamplers` pass, which runs before this
+        // `static_assert` is checked and itself fails on a combined sampler built from the heap, so
+        // this guard cannot turn that into a clean diagnostic. These `case`s mirror the
+        // combined-sampler branches in `defaultGetDescriptorFromHandle`; the two lists are kept in
+        // agreement.
         __target_switch
         {
         case hlsl:
         case spvDescriptorHeapEXT:
+        case wgsl_resource_table:
             static_assert(This.kind != DescriptorKind.CombinedTextureSampler, "Cannot initialize a combined texture-sampler from a single ResourceDescriptorHeap index; load the texture and sampler separately from ResourceDescriptorHeap and SamplerDescriptorHeap.");
             break;
         case spirv:
@@ -29445,12 +29447,13 @@ extension DescriptorHandle<T>
         static_assert(!usesNativeSpirvDescriptorHandle<T>(), "Cannot convert a descriptor heap index to a native bindless DescriptorHandle; with spvDescriptorHeapEXT, assign the heap entry directly to the resource or sampler type instead");
         // A single `ResourceDescriptorHeap[i]` index also cannot build a combined texture-sampler on the
         // targets whose `defaultGetDescriptorFromHandle` combined-sampler branch consumes a separate
-        // sampler index (HLSL, SPIR-V `spvDescriptorHeapEXT`). Under NV+EXT the native-handle assertion
-        // above already owns the diagnosis, so the check below is refined to `spvDescriptorHeapEXT`
-        // without NV (the nested switch).
+        // sampler index (HLSL, SPIR-V `spvDescriptorHeapEXT`, WGSL `wgsl_resource_table`). Under NV+EXT
+        // the native-handle assertion above already owns the diagnosis, so the check below is refined
+        // to `spvDescriptorHeapEXT` without NV (the nested switch).
         __target_switch
         {
         case hlsl:
+        case wgsl_resource_table:
             static_assert(T.kind != DescriptorKind.CombinedTextureSampler, "a combined texture-sampler needs separate resource and sampler descriptor-heap indices on this target, so its .Handle cannot be built from a single ResourceDescriptorHeap index; use the explicit .Handle(uint2(resourceIndex, samplerIndex)) form to specify both");
             break;
         case spvDescriptorHeapEXT:
@@ -29531,11 +29534,13 @@ __intrinsic_op($(kIROp_GetDynamicResourceHeap))
 T[] __getDynamicResourceHeap<T:IOpaqueDescriptor>(constexpr uint bindingIndex = 0);
 
 
-// Used by the HLSL backend only, load a sampler state handle from SamplerDescriptorHeap.
+// Load a sampler from the implicit descriptor heap: `SamplerDescriptorHeap[index]` on HLSL and
+// `getResource<T>(index)` on WGSL with `wgsl_resource_table`.
 __intrinsic_op($(kIROp_LoadSamplerDescriptorFromHeap))
 T __loadSamplerDescriptorFromHeap<T>(uint index);
 
-// Used by the HLSL backend only, load a resource handle from ResourceDescriptorHeap.
+// Load a resource from the implicit descriptor heap: `ResourceDescriptorHeap[index]` on HLSL and
+// `getResource<T>(index)` on WGSL with `wgsl_resource_table`.
 __intrinsic_op($(kIROp_LoadResourceDescriptorFromHeap))
 T __loadResourceDescriptorFromHeap<T>(uint index);
 
@@ -29549,8 +29554,9 @@ internal uint __spirvSamplerHeap();
 __intrinsic_op($(kIROp_SPIRVResourceHeap))
 internal uint __spirvResourceHeap();
 
-// Used by the HLSL and Metal backends only,
-// create a combined texture sampler object from a bindless handle.
+// Create a combined texture sampler object from a bindless handle whose `.x` indexes the texture
+// and whose `.y` indexes the sampler. Used by the HLSL, SPIR-V descriptor heap and WGSL resource
+// table paths.
 __intrinsic_op($(kIROp_MakeCombinedTextureSamplerFromHandle))
 T __makeCombinedTextureSamplerFromHandle<T, U>(U handle);
 
@@ -29667,6 +29673,26 @@ T getDescriptorFromDescriptorHeapEXT<T:IOpaqueDescriptor>(uint2 handle)
         return __spirvLoadDescriptorFromHeap<T>(__spirvResourceHeap(), handle.x);
 }
 
+/// Load a descriptor from an implicit descriptor heap that the shader indexes without declaring
+/// it: HLSL Shader Model 6.6's `ResourceDescriptorHeap` / `SamplerDescriptorHeap`, or the WGSL
+/// resource table under `wgsl_resource_table`. Samplers load at `handle.x` with
+/// `__loadSamplerDescriptorFromHeap` and every other single-descriptor kind at `handle.x` with
+/// `__loadResourceDescriptorFromHeap`. A combined texture-sampler is assembled from both components
+/// of the handle by `__makeCombinedTextureSamplerFromHandle`, which `lowerCombinedTextureSamplers`
+/// splits into a resource load at `handle.x` and a sampler load at `handle.y`. HLSL emits the loads
+/// as heap subscripts and WGSL emits them as `getResource<T>(index)`, so both targets share this
+/// lowering.
+[ForceInline]
+T getDescriptorFromImplicitHeap<T:IOpaqueDescriptor>(uint2 handle)
+{
+    if (T.kind == DescriptorKind.Sampler)
+        return __loadSamplerDescriptorFromHeap<T>(handle.x);
+    else if (T.kind == DescriptorKind.CombinedTextureSampler)
+        return __makeCombinedTextureSamplerFromHandle<T>(handle);
+    else
+        return __loadResourceDescriptorFromHeap<T>(handle.x);
+}
+
 /// Convert an explicit descriptor-heap index (from `ResourceDescriptorHeap[i]` / `SamplerDescriptorHeap[j]`,
 /// packed as `handle.x`) into a descriptor `T`. Shared by every untyped-handle→resource constructor.
 ///
@@ -29709,12 +29735,7 @@ T defaultGetDescriptorFromHandle<T:IOpaqueDescriptor>(DescriptorHandle<T> handle
     __target_switch
     {
     case hlsl:
-        if (T.kind == DescriptorKind.Sampler)
-            return __loadSamplerDescriptorFromHeap<T>(((uint2)handleValue).x);
-        else if (T.kind == DescriptorKind.CombinedTextureSampler)
-            return __makeCombinedTextureSamplerFromHandle<T>((uint2)handleValue);
-        else
-            return __loadResourceDescriptorFromHeap<T>(((uint2)handleValue).x);
+        return getDescriptorFromImplicitHeap<T>((uint2)handleValue);
     case spirv:
     case glsl:
         // This arm also collapses the switch's inferred SPIR-V requirement to `{spirv}`, so the
@@ -29722,6 +29743,11 @@ T defaultGetDescriptorFromHandle<T:IOpaqueDescriptor>(DescriptorHandle<T> handle
         return getDescriptorFromDynamicResourceHeap<T>(handleValue, bindlessOptions);
     case wgsl:
         return __getDynamicResourceHeap<T>()[((uint2)handleValue).x];
+    case wgsl_resource_table:
+        // WGSL's `getResource` accepts only sampled textures and samplers, which is everything the
+        // WebGPU `"sampling-resource-table"` feature lets a resource table hold.
+        static_assert(T.kind == DescriptorKind.Sampler || T.kind == DescriptorKind.CombinedTextureSampler || (T.kind == DescriptorKind.Texture && DescriptorAccess.Read == T.descriptorAccess), "A WGSL resource table holds only sampled textures and samplers; a DescriptorHandle to a buffer or a storage texture cannot be loaded from it");
+        return getDescriptorFromImplicitHeap<T>((uint2)handleValue);
     case spvBindlessTextureNV:
         if (__isBindlessTextureNVEncodable<T>())
             return __castDescriptorHandleToResource<T>(handleValue);

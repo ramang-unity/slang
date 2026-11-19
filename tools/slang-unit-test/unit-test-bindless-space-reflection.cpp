@@ -594,6 +594,22 @@ SLANG_UNIT_TEST(bindlessSpaceMetadataWGSLDynamicResourceHeap)
         nullptr);
 }
 
+// A WebGPU host sets `GPUPipelineLayoutDescriptor.usesResourceTable` when the shader reads the
+// resource table, so the metadata reports the heap as used when `wgsl_resource_table` turns handle
+// dereferences into `getResource` calls.
+SLANG_UNIT_TEST(bindlessSpaceMetadataWGSLResourceTable)
+{
+    _checkBindlessSpaceReflection(
+        _getTextureHandleSource(),
+        _expectAnyReservedBindlessSpace(),
+        true,
+        nullptr,
+        0,
+        SLANG_WGSL,
+        nullptr,
+        "wgsl_resource_table");
+}
+
 SLANG_UNIT_TEST(bindlessSpaceMetadataNativeHandleCasts)
 {
     _checkBindlessSpaceReflection(
